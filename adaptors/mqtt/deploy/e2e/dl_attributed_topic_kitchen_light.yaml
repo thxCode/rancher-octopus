@@ -27,12 +27,12 @@ spec:
         - name: "switch"
           description: "The switch of light"
           type: "boolean"
-          readOnlye: false
+          readOnly: false
           qos: 2
         - name: "gear"
           description: "The gear of light"
           type: "string"
-          readOnlye: false
+          readOnly: false
           annotations:
             type: "enum"
             format: "low,mid,high"

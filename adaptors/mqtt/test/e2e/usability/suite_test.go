@@ -78,17 +78,13 @@ var _ = BeforeSuite(func(done Done) {
 
 	installOctopus()
 
-	installMQTTServer()
-
-	installMQTTSimulator()
+	installMQTTSimulationSuite()
 
 	close(done)
 }, 600)
 
 var _ = AfterSuite(func(done Done) {
-	uninstallMQTTSimulator()
-
-	uninstallMQTTServer()
+	uninstallMQTTSimulationSuite()
 
 	uninstallOctopus()
 
@@ -124,6 +120,8 @@ func installOctopus() {
 		Should(Succeed())
 
 	isOctopusAvailable()
+
+	isMQTTAdaptorAvailable()
 }
 
 func uninstallOctopus() {
@@ -196,67 +194,80 @@ func isOctopusAvailable() {
 		return daemonset.Status.NumberAvailable > 0 &&
 			daemonset.Status.DesiredNumberScheduled == daemonset.Status.NumberReady, nil
 	}, 300, 1).Should(BeTrue())
+}
+
+func isMQTTAdaptorAvailable() {
+
+	// TODO
 
 }
 
-func installMQTTServer() {
-	Expect(exec.RunKubectl(nil, GinkgoWriter, "apply", "-f", filepath.Join(testCurrDir, "test", "e2e", "usability", "testdata", "mosquitto-service.yaml"))).
+func installMQTTSimulationSuite() {
+	// install MQTT broker
+	Expect(exec.RunKubectl(nil, GinkgoWriter, "apply", "-f", filepath.Join(testCurrDir, "test", "e2e", "usability", "testdata", "mqtt-broker.yaml"))).
+		Should(Succeed())
+
+	// install MQTT simulator
+	Expect(exec.RunKubectl(nil, GinkgoWriter, "apply", "-f", filepath.Join(testCurrDir, "deploy", "e2e", "simulator.yaml"))).
 		Should(Succeed())
 
 	isMQTTServerAvailable()
-}
-
-func uninstallMQTTServer() {
-	Expect(exec.RunKubectl(nil, GinkgoWriter, "delete", "-f", filepath.Join(testCurrDir, "test", "e2e", "usability", "testdata", "mosquitto-service.yaml"))).
-		Should(Succeed())
-}
-
-func isMQTTServerAvailable() {
-	var deploy appsv1.Deployment
-	var key = types.NamespacedName{
-		Name:      "mosquitto-deploy",
-		Namespace: "default",
-	}
-	Eventually(func() bool {
-		if err := k8sCli.Get(testCtx, key, &deploy); err != nil {
-			Fail(err.Error())
-		}
-		for _, condition := range deploy.Status.Conditions {
-			if condition.Type == "Available" {
-				return condition.Status == "True"
-			}
-		}
-		return false
-	}, 300, 3).Should(BeTrue())
-}
-
-func installMQTTSimulator() {
-	Expect(exec.RunKubectl(nil, GinkgoWriter, "apply", "-f", filepath.Join(testCurrDir, "deploy", "e2e", "simulator.yaml"))).
-		Should(Succeed())
 
 	isMQTTSimulatorAvailable()
 }
 
-func uninstallMQTTSimulator() {
+func uninstallMQTTSimulationSuite() {
+	// uninstall MQTT broker
+	Expect(exec.RunKubectl(nil, GinkgoWriter, "delete", "-f", filepath.Join(testCurrDir, "test", "e2e", "usability", "testdata", "mqtt-broker.yaml"))).
+		Should(Succeed())
+
+	// uninstall MQTT simulator
 	Expect(exec.RunKubectl(nil, GinkgoWriter, "delete", "-f", filepath.Join(testCurrDir, "deploy", "e2e", "simulator.yaml"))).
 		Should(Succeed())
 }
 
+func isMQTTServerAvailable() {
+	var endpoints corev1.Endpoints
+	var key = types.NamespacedName{
+		Name:      "mqtt-broker",
+		Namespace: "default",
+	}
+	Eventually(func() bool {
+		if err := k8sCli.Get(testCtx, key, &endpoints); err != nil {
+			GinkgoT().Log(err)
+			return false
+		}
+		if len(endpoints.Subsets) != 0 {
+			var subset = endpoints.Subsets[0]
+			if len(subset.Addresses) != 0 && len(subset.Ports) != 0 {
+				for _, port := range subset.Ports {
+					return port.Name == "unencrypted" && port.Port == 1883
+				}
+			}
+		}
+		return false
+	}, 300, 1).Should(BeTrue())
+}
+
 func isMQTTSimulatorAvailable() {
-	var deploy appsv1.Deployment
+	var endpoints corev1.Endpoints
 	var key = types.NamespacedName{
 		Name:      "octopus-simulator-mqtt",
 		Namespace: "octopus-simulator-system",
 	}
 	Eventually(func() bool {
-		if err := k8sCli.Get(testCtx, key, &deploy); err != nil {
-			Fail(err.Error())
+		if err := k8sCli.Get(testCtx, key, &endpoints); err != nil {
+			GinkgoT().Log(err)
+			return false
 		}
-		for _, condition := range deploy.Status.Conditions {
-			if condition.Type == "Available" {
-				return condition.Status == "True"
+		if len(endpoints.Subsets) != 0 {
+			var subset = endpoints.Subsets[0]
+			if len(subset.Addresses) != 0 && len(subset.Ports) != 0 {
+				for _, port := range subset.Ports {
+					return port.Name == "tcp" && port.Port == 1883
+				}
 			}
 		}
 		return false
-	}, 300, 3).Should(BeTrue())
+	}, 300, 1).Should(BeTrue())
 }

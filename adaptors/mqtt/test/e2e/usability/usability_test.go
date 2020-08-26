@@ -1,13 +1,12 @@
 package usability_test
 
 import (
-	"encoding/base64"
 	"fmt"
 	"path/filepath"
 
-	mqtt "github.com/eclipse/paho.mqtt.golang"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,22 +15,84 @@ import (
 
 	"github.com/rancher/octopus/adaptors/mqtt/api/v1alpha1"
 	edgev1alpha1 "github.com/rancher/octopus/api/v1alpha1"
+	"github.com/rancher/octopus/pkg/util/converter"
+	"github.com/rancher/octopus/pkg/util/object"
+	"github.com/rancher/octopus/test/framework"
+	"github.com/rancher/octopus/test/util/content"
 	"github.com/rancher/octopus/test/util/exec"
 	"github.com/rancher/octopus/test/util/node"
 )
 
+/*
+	NB(uuuxxllj): the following cases focus on AttributedTopic pattern.
+*/
+
 var (
-	testDeviceLink          edgev1alpha1.DeviceLink
-	testDeviceLinkName      = "kitchen-light"
-	testDeviceLinkNamespace = "default"
-	subscribedMessage       string
-	temporaryMessage        string
+	testDeviceLink edgev1alpha1.DeviceLink
 )
 
 var _ = Describe("verify usability", func() {
 
+	var targetNode string
+
 	BeforeEach(func() {
-		deployMQTTDeviceLink()
+		var err error
+		targetNode, err = node.GetValidWorker(testCtx, k8sCli)
+		Expect(err).ShouldNot(HaveOccurred())
+
+		// defaults to create the kitchen light device link connected to MQTT simulator
+		testDeviceLink = edgev1alpha1.DeviceLink{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace:    "default",
+				GenerateName: "test-kitchen-light-",
+			},
+			Spec: edgev1alpha1.DeviceLinkSpec{
+				Adaptor: edgev1alpha1.DeviceAdaptor{
+					Node: targetNode,
+					Name: "adaptors.edge.cattle.io/mqtt",
+				},
+				Model: metav1.TypeMeta{
+					Kind:       "MQTTDevice",
+					APIVersion: "devices.edge.cattle.io/v1alpha1",
+				},
+				Template: edgev1alpha1.DeviceTemplateSpec{
+					Spec: content.ToRawExtension(
+						map[string]interface{}{
+							"protocol": map[string]interface{}{
+								"pattern": "AttributedTopic",
+								"client": map[string]interface{}{
+									"server": "tcp://octopus-simulator-mqtt.octopus-simulator-system:1883",
+								},
+								"message": map[string]interface{}{
+									"topic": "cattle.io/octopus/home/:operator/kitchen/light/:path",
+									"operator": map[string]interface{}{
+										"read":  "status",
+										"write": "set",
+									},
+								},
+							},
+							"properties": []map[string]interface{}{
+								{
+									"name":     "switch",
+									"type":     "boolean",
+									"readOnly": false,
+								},
+								{
+									"name": "luminance",
+									"path": "parameter_luminance",
+									"type": "int",
+								},
+							},
+						},
+					),
+				},
+			},
+		}
+	})
+
+	JustBeforeEach(func() {
+		// create device link
+		Expect(k8sCli.Create(testCtx, &testDeviceLink)).Should(Succeed())
 	})
 
 	AfterEach(func() {
@@ -95,95 +156,76 @@ var _ = Describe("verify usability", func() {
 			By("then the device link is connected", isDeviceConnectedTrue)
 
 		})
+
+		Context("deploy device with invalid spec", func() {
+
+			BeforeEach(func() {
+
+				// create a device link with invalid spec
+				testDeviceLink = edgev1alpha1.DeviceLink{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:    "default",
+						GenerateName: "test-kitchen-light-",
+					},
+					Spec: edgev1alpha1.DeviceLinkSpec{
+						Adaptor: edgev1alpha1.DeviceAdaptor{
+							Node: targetNode,
+							Name: "adaptors.edge.cattle.io/mqtt",
+						},
+						Model: metav1.TypeMeta{
+							Kind:       "MQTTDevice",
+							APIVersion: "devices.edge.cattle.io/v1alpha1",
+						},
+						Template: edgev1alpha1.DeviceTemplateSpec{
+							Spec: content.ToRawExtension(
+								map[string]interface{}{
+									"protocol": map[string]interface{}{
+										// NB(thxCode): as we know, pattern is required.
+										// "pattern": "AttributedTopic",
+										"client": map[string]interface{}{
+											"server": "tcp://octopus-simulator-mqtt.octopus-simulator-system:1883",
+										},
+										"message": map[string]interface{}{
+											"topic": "cattle.io/octopus/home/:operator/kitchen/light/:path",
+										},
+										"properties": []map[string]interface{}{
+											{
+												"name":     "switch",
+												"type":     "boolean",
+												"readOnly": false,
+											},
+											{
+												"name": "luminance",
+												"path": "parameter_luminance",
+												"type": "int",
+											},
+										},
+									},
+								},
+							),
+						},
+					},
+				}
+
+			})
+
+			Specify("if deploy device with invalid spec", func() {
+
+				By("given the device link is blocked in failed creation", isDeviceCreatedFalse)
+
+				By("when correct the spec", correctDeviceSpec)
+
+				By("then the device link is connected", isDeviceConnectedTrue)
+
+			})
+
+		})
+
 	})
 
-	Context("publish/subscribe messages through MQTT device link", func() {
+	Context("interfere deployment environment", func() {
 
-		// unable to publish message through simulator
-		PSpecify("publish messages through an MQTT device link", func() {
-
-			By("given the device link is connected", isDeviceConnectedTrue)
-
-			By("when publish a message to corresponding MQTT server", publishMessage)
-
-			By("then the message should be inside device link", isPublishedMessageInsideDeviceLink)
-
-		})
-
-		PSpecify("subscribe messages through an MQTT device link", func() {
-
-			// By("when deploy an MQTT device link with remote server", deployDeviceLinkWithRemoteServer)
-
-			By("then the device link is connected", isDeviceConnectedTrue)
-
-			By("when subscribe a message from server", subscribeMessage)
-
-			By("then the message is same to the value in device link", isSubscribedMessageValid)
-
-		})
-
-		PSpecify("subscribe messages through an MQTT device link which does not exist", func() {
-
-			// By("when deploy MQTT device link with remote server", deployDeviceLinkWithRemoteServer)
-
-			By("then the device link is connected", isDeviceConnectedTrue)
-
-			By("when subscribe a message and save it", subscribeMessageAndSave)
-
-			By("the the message is subscribed", isSubscribedMessageValid)
-
-			By("when delete MQTT device link", deleteMQTTDeviceLink)
-
-			By("then the device link is deleted", isDeviceLinkDeleted)
-
-			By("when subscribe a message again", subscribeMessage)
-
-			By("then the two messages are the same", isMessagesTheSame)
-
-		})
-
-		PSpecify("subscribe messages through an MQTT device link whose payload is null", func() {
-
-			By("when deploy an MQTT device link with payload null", deployDeviceLinkWithPayloadNull)
-
-			By("then the device link is connected", isDeviceConnectedTrue)
-
-			By("when subscribe a message", subscribeMessage)
-
-			By("then the message is null", isSubscribeMessageNull)
-
-		})
-
-		Specify("if the MQTT server is unavailable", func() {
-
-			By("given the device link is connected", isDeviceConnectedTrue)
-
-			By("when invalid server URL", invalidServerURL)
-
-			By("then the device link is not connected", isDeviceCreatedFalse)
-
-			By("when correct server URL", correctServerURL)
-
-			By("then the device link is connected", isDeviceConnectedTrue)
-
-		})
-
-		PSpecify("subscribe messages through an MQTT device link whose payload is a complex JSON", func() {
-
-			By("when deploy an MQTT device link whose payload is a complex JSON", deployDeviceLinkWithComplexJSONPayload)
-
-			By("then the device link is connected", isDeviceConnectedTrue)
-
-			By("when subscribe a message", subscribeMessage)
-
-			By("then the subscribed message is same to the JSON payload", isSubscribedMessageValid)
-
-		})
-	})
-
-	Context("operation on pods/CRD/nodes", func() {
-
-		Specify("if delete adaptor pods", func() {
+		Specify("if delete MQTT adaptor pods", func() {
 
 			By("given the device link is connected", isDeviceConnectedTrue)
 
@@ -193,7 +235,7 @@ var _ = Describe("verify usability", func() {
 
 		})
 
-		Specify("if delete limbs pods", func() {
+		Specify("if delete octopus limbs pods", func() {
 
 			By("given the device link is connected", isDeviceConnectedTrue)
 
@@ -211,7 +253,9 @@ var _ = Describe("verify usability", func() {
 
 			By("then model of the device link is not found", isModelExistedFalse)
 
-			By("redeploy MQTT device model", redeployMQTTDeviceModel)
+			By("when redeploy MQTT device model", redeployMQTTDeviceModel)
+
+			By("then the device link is connected", isDeviceConnectedTrue)
 
 		})
 
@@ -223,18 +267,276 @@ var _ = Describe("verify usability", func() {
 
 			By("then node of the device link is not found", isNodeExistedFalse)
 
+			By("when redeploy corresponding cluster node", redeployCorrespondingNode)
+
+			By("then the device link is connected", isDeviceConnectedTrue)
+
 		})
+
 	})
+
+	Context("interact with simulation suite", func() {
+
+		Specify("if connect with octopus-simulator", func() {
+
+			By("given the device link is connected", isDeviceConnectedTrue)
+
+			By("when turn on the closed simulated device", func() {
+				// TODO patch switch to true
+			})
+
+			By("then the device is on and changing its status", func() {
+				// TODO verify the status if the switch is true and the luminance is changed
+			})
+
+		})
+
+		Context("connect with in-cluster MQTT broker", func() {
+
+			BeforeEach(func() {
+
+				// create the device link connected to an in-cluster MQTT broker
+				testDeviceLink = edgev1alpha1.DeviceLink{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:    "default",
+						GenerateName: "test-mqtt-",
+					},
+					Spec: edgev1alpha1.DeviceLinkSpec{
+						Adaptor: edgev1alpha1.DeviceAdaptor{
+							Node: targetNode,
+							Name: "adaptors.edge.cattle.io/mqtt",
+						},
+						Model: metav1.TypeMeta{
+							Kind:       "MQTTDevice",
+							APIVersion: "devices.edge.cattle.io/v1alpha1",
+						},
+						Template: edgev1alpha1.DeviceTemplateSpec{
+							Spec: content.ToRawExtension(
+								map[string]interface{}{
+									"protocol": map[string]interface{}{
+										"pattern": "AttributedTopic",
+										"client": map[string]interface{}{
+											// we connect to the in-cluster MQTT broker
+											"server": "tcp://mqtt-broker.default:1883",
+										},
+										"message": map[string]interface{}{
+											"topic": "cattle.io/octopus/home/:operator/in-cluster/:path",
+											"operator": map[string]interface{}{
+												"read":  "status",
+												"write": "set",
+											},
+										},
+									},
+									"properties": []map[string]interface{}{
+										{
+											"name":        "subscribeValue",
+											"path":        "subscribe_value",
+											"type":        "string",
+											"description": "subscribe from broker",
+										},
+										{
+											"name":        "publishValue",
+											"path":        "publish_value",
+											"type":        "string",
+											"description": "publish to broker",
+											"readOnly":    false,
+										},
+									},
+								},
+							),
+						},
+					},
+				}
+
+			})
+
+			It("should receive a message", func() {
+
+				By("given the device link is connected", isDeviceConnectedTrue)
+
+				By("when publish a message to a specified topic of in-cluster MQTT broker", func() {
+					// run a Job connect the in-cluster MQTT broker and do as below:
+					// publish message "hello" to topic "cattle.io/octopus/home/status/in-cluster/subscribe_value".
+					var publishedJob = batchv1.Job{
+						ObjectMeta: metav1.ObjectMeta{
+							Namespace:    "default",
+							GenerateName: "test-mqtt-",
+						},
+						Spec: batchv1.JobSpec{
+							Template: corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{
+									RestartPolicy: corev1.RestartPolicyNever,
+									Containers: []corev1.Container{
+										{
+											Name:  "publish",
+											Image: "eclipse-mosquitto:1.6.12",
+											Command: []string{
+												"mosquitto_pub",
+											},
+											Args: []string{
+												"-h",
+												"mqtt-broker.default",
+												"-t",
+												"cattle.io/octopus/home/status/in-cluster/subscribe_value",
+												"-m",
+												"hello",
+												"-q",
+												"1",
+												"-r",
+											},
+										},
+									},
+								},
+							},
+						},
+					}
+					Expect(k8sCli.Create(testCtx, &publishedJob)).Should(Succeed())
+
+					var publishedJobKey = object.GetNamespacedName(&publishedJob)
+					Eventually(func() bool {
+						var err = k8sCli.Get(testCtx, publishedJobKey, &publishedJob)
+						if err != nil {
+							GinkgoT().Log(err)
+							return false
+						}
+						for _, cond := range publishedJob.Status.Conditions {
+							if cond.Type == batchv1.JobComplete {
+								return cond.Status == corev1.ConditionTrue
+							}
+						}
+						return false
+					}, 30, 1).Should(BeTrue())
+				})
+
+				By("then the device received the message", func() {
+					var deviceLinkKey = object.GetNamespacedName(&testDeviceLink)
+					Eventually(func() bool {
+						var device v1alpha1.MQTTDevice
+						var err = k8sCli.Get(testCtx, deviceLinkKey, &device)
+						if err != nil {
+							GinkgoT().Log(err)
+							return false
+						}
+
+						for _, prop := range device.Status.Properties {
+							if prop.Name == "subscribeValue" && prop.Value != nil {
+								var val, err = converter.DecodeBase64(prop.Value.Raw[1 : len(prop.Value.Raw)-1])
+								if err == nil {
+									return string(val) == "hello"
+								}
+							}
+						}
+						return false
+					}, 30, 1).Should(BeTrue())
+				})
+
+			})
+
+			XIt("should publish a message", func() {
+
+				By("given the device link is connected", isDeviceConnectedTrue)
+
+				By("when set value to a writable property", func() {
+					var err = k8sCli.Get(testCtx, object.GetNamespacedName(&testDeviceLink), &testDeviceLink)
+					Expect(err).Should(Succeed())
+					var patch = []byte(`{"spec":{"template":{"spec":{"properties":[{"name":"publishValue","readOnly":false,"value":"hello"}]}}}}`)
+					Expect(k8sCli.Patch(testCtx, &testDeviceLink, client.RawPatch(types.MergePatchType, patch))).Should(Succeed())
+				})
+
+				By("then the value can be received by subscribers", func() {
+					// run a Job connect to the in-cluster MQTT broker and do as below:
+					// subscribe topic "cattle.io/octopus/home/set/in-cluster/publish_value",
+					// and verify the message is "hello".
+					var subscribedJob = batchv1.Job{
+						ObjectMeta: metav1.ObjectMeta{
+							Namespace:    "default",
+							GenerateName: "test-mqtt-",
+						},
+						Spec: batchv1.JobSpec{
+							Template: corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{
+									InitContainers: []corev1.Container{
+										{
+											Name:  "subscribe",
+											Image: "eclipse-mosquitto:1.6.12",
+											Command: []string{
+												"/bin/sh",
+											},
+											Args: []string{
+												"-c",
+												"mosquitto_sub -h mqtt-broker.default -t cattle.io/octopus/home/set/in-cluster/publish_value -C 1",
+											},
+											VolumeMounts: []corev1.VolumeMount{
+												{
+													Name:      "temp-volume",
+													MountPath: "/data",
+												},
+											},
+										},
+									},
+									RestartPolicy: corev1.RestartPolicyOnFailure,
+									Containers: []corev1.Container{
+										{
+											Name:  "test",
+											Image: "eclipse-mosquitto:1.6.12",
+											Command: []string{
+												"/bin/sh",
+											},
+											Args: []string{
+												"-c",
+												"cat /data/test; grep -w 'hello' /data/test",
+											},
+											VolumeMounts: []corev1.VolumeMount{
+												{
+													Name:      "temp-volume",
+													MountPath: "/data",
+												},
+											},
+										},
+									},
+									Volumes: []corev1.Volume{
+										{
+											Name: "temp-volume",
+											VolumeSource: corev1.VolumeSource{
+												EmptyDir: &corev1.EmptyDirVolumeSource{},
+											},
+										},
+									},
+								},
+							},
+						},
+					}
+					Expect(k8sCli.Create(testCtx, &subscribedJob)).Should(Succeed())
+
+					var subscribedJobKey = object.GetNamespacedName(&subscribedJob)
+					Eventually(func() bool {
+						var err = k8sCli.Get(testCtx, subscribedJobKey, &subscribedJob)
+						if err != nil {
+							GinkgoT().Log(err)
+							return false
+						}
+						for _, cond := range subscribedJob.Status.Conditions {
+							if cond.Type == batchv1.JobComplete {
+								return cond.Status == corev1.ConditionTrue
+							}
+						}
+						return false
+					}, 30, 1).Should(BeTrue())
+				})
+
+			})
+
+		})
+
+	})
+
 })
 
 type judgeFunc func(edgev1alpha1.DeviceLink) bool
 
 func doDeviceLinkJudgment(judge judgeFunc) {
+	var deviceLinkKey = object.GetNamespacedName(&testDeviceLink)
 	Eventually(func() bool {
-		var deviceLinkKey = types.NamespacedName{
-			Name:      testDeviceLinkName,
-			Namespace: testDeviceLinkNamespace,
-		}
 		if err := k8sCli.Get(testCtx, deviceLinkKey, &testDeviceLink); err != nil {
 			Fail(err.Error())
 		}
@@ -242,44 +544,20 @@ func doDeviceLinkJudgment(judge judgeFunc) {
 	}, 300, 3).Should(BeTrue())
 }
 
-func getDeviceLinkPointer() *edgev1alpha1.DeviceLink {
-	var deviceLinkKey = types.NamespacedName{
-		Namespace: testDeviceLink.Namespace,
-		Name:      testDeviceLink.Name,
-	}
-	if err := k8sCli.Get(testCtx, deviceLinkKey, &testDeviceLink); err != nil {
-		Fail(err.Error())
-	}
-	return &testDeviceLink
-}
-
-func deployMQTTDeviceLink() {
-	Expect(exec.RunKubectl(nil, GinkgoWriter, "apply", "-f", filepath.Join(testCurrDir, "deploy", "e2e", "dl_attributed_topic_kitchen_light.yaml"))).
-		Should(Succeed())
-}
-
-func deployDeviceLinkWithPayloadNull() {
-	Expect(exec.RunKubectl(nil, GinkgoWriter, "apply", "-f", filepath.Join(testCurrDir, "test", "e2e", "usability", "testdata", "dl_attributed_topic_payload_null.yaml"))).
-		Should(Succeed())
-}
-
-func deployDeviceLinkWithComplexJSONPayload() {
-	Expect(exec.RunKubectl(nil, GinkgoWriter, "apply", "-f", filepath.Join(testCurrDir, "test", "e2e", "usability", "testdata", "dl_attributed_topic_complex_json.yaml"))).
-		Should(Succeed())
-}
-
 func correctNodeSpec() {
 	var targetNode, err = node.GetValidWorker(testCtx, k8sCli)
 	Expect(err).ShouldNot(HaveOccurred())
-	deviceLinkPtr := getDeviceLinkPointer()
-	patch := []byte(fmt.Sprintf(`{"spec":{"adaptor":{"node":"%s"}}}`, targetNode))
-	Expect(k8sCli.Patch(testCtx, deviceLinkPtr, client.RawPatch(types.MergePatchType, patch))).Should(Succeed())
+	err = k8sCli.Get(testCtx, object.GetNamespacedName(&testDeviceLink), &testDeviceLink)
+	Expect(err).Should(Succeed())
+	var patch = []byte(fmt.Sprintf(`{"spec":{"adaptor":{"node":"%s"}}}`, targetNode))
+	Expect(k8sCli.Patch(testCtx, &testDeviceLink, client.RawPatch(types.MergePatchType, patch))).Should(Succeed())
 }
 
 func invalidNodeSpec() {
-	deviceLinkPtr := getDeviceLinkPointer()
-	patch := []byte(`{"spec":{"adaptor":{"node":"wrong-node"}}}`)
-	Expect(k8sCli.Patch(testCtx, deviceLinkPtr, client.RawPatch(types.MergePatchType, patch))).Should(Succeed())
+	var err = k8sCli.Get(testCtx, object.GetNamespacedName(&testDeviceLink), &testDeviceLink)
+	Expect(err).Should(Succeed())
+	var patch = []byte(`{"spec":{"adaptor":{"node":"wrong-node"}}}`)
+	Expect(k8sCli.Patch(testCtx, &testDeviceLink, client.RawPatch(types.MergePatchType, patch))).Should(Succeed())
 }
 
 func isNodeExistedTrue() {
@@ -297,15 +575,17 @@ func isNodeExistedFalse() {
 }
 
 func correctModelSpec() {
-	deviceLinkPtr := getDeviceLinkPointer()
-	patch := []byte(`{"spec":{"model":{"apiVersion":"devices.edge.cattle.io/v1alpha1"}}}`)
-	Expect(k8sCli.Patch(testCtx, deviceLinkPtr, client.RawPatch(types.MergePatchType, patch))).Should(Succeed())
+	var err = k8sCli.Get(testCtx, object.GetNamespacedName(&testDeviceLink), &testDeviceLink)
+	Expect(err).Should(Succeed())
+	var patch = []byte(`{"spec":{"model":{"apiVersion":"devices.edge.cattle.io/v1alpha1"}}}`)
+	Expect(k8sCli.Patch(testCtx, &testDeviceLink, client.RawPatch(types.MergePatchType, patch))).Should(Succeed())
 }
 
 func invalidModelSpec() {
-	deviceLinkPtr := getDeviceLinkPointer()
-	patch := []byte(`{"spec":{"model":{"apiVersion":"wrong-apiVersion"}}}`)
-	Expect(k8sCli.Patch(testCtx, deviceLinkPtr, client.RawPatch(types.MergePatchType, patch))).Should(Succeed())
+	var err = k8sCli.Get(testCtx, object.GetNamespacedName(&testDeviceLink), &testDeviceLink)
+	Expect(err).Should(Succeed())
+	var patch = []byte(`{"spec":{"model":{"apiVersion":"wrong-apiVersion"}}}`)
+	Expect(k8sCli.Patch(testCtx, &testDeviceLink, client.RawPatch(types.MergePatchType, patch))).Should(Succeed())
 }
 
 func isModelExistedTrue() {
@@ -323,15 +603,17 @@ func isModelExistedFalse() {
 }
 
 func correctAdaptorSpec() {
-	deviceLinkPtr := getDeviceLinkPointer()
-	patch := []byte(`{"spec":{"adaptor":{"name":"adaptors.edge.cattle.io/mqtt"}}}`)
-	Expect(k8sCli.Patch(testCtx, deviceLinkPtr, client.RawPatch(types.MergePatchType, patch))).Should(Succeed())
+	var err = k8sCli.Get(testCtx, object.GetNamespacedName(&testDeviceLink), &testDeviceLink)
+	Expect(err).Should(Succeed())
+	var patch = []byte(`{"spec":{"adaptor":{"name":"adaptors.edge.cattle.io/mqtt"}}}`)
+	Expect(k8sCli.Patch(testCtx, &testDeviceLink, client.RawPatch(types.MergePatchType, patch))).Should(Succeed())
 }
 
 func invalidAdaptorSpec() {
-	deviceLinkPtr := getDeviceLinkPointer()
-	patch := []byte(`{"spec":{"adaptor":{"name":"wrong-adaptor-name"}}}`)
-	Expect(k8sCli.Patch(testCtx, deviceLinkPtr, client.RawPatch(types.MergePatchType, patch))).Should(Succeed())
+	var err = k8sCli.Get(testCtx, object.GetNamespacedName(&testDeviceLink), &testDeviceLink)
+	Expect(err).Should(Succeed())
+	var patch = []byte(`{"spec":{"adaptor":{"name":"wrong-adaptor-name"}}}`)
+	Expect(k8sCli.Patch(testCtx, &testDeviceLink, client.RawPatch(types.MergePatchType, patch))).Should(Succeed())
 }
 
 func isAdaptorExistedTrue() {
@@ -349,15 +631,17 @@ func isAdaptorExistedFalse() {
 }
 
 func correctDeviceSpec() {
-	deviceLinkPtr := getDeviceLinkPointer()
-	patch := []byte(`{"spec":{"template":{"spec":{"protocol":{"pattern":"AttributedTopic"}}}}}`)
-	Expect(k8sCli.Patch(testCtx, deviceLinkPtr, client.RawPatch(types.MergePatchType, patch))).Should(Succeed())
+	var err = k8sCli.Get(testCtx, object.GetNamespacedName(&testDeviceLink), &testDeviceLink)
+	Expect(err).Should(Succeed())
+	var patch = []byte(`{"spec":{"template":{"spec":{"protocol":{"pattern":"AttributedTopic"}}}}}`)
+	Expect(k8sCli.Patch(testCtx, &testDeviceLink, client.RawPatch(types.MergePatchType, patch))).Should(Succeed())
 }
 
 func invalidDeviceSpec() {
-	deviceLinkPtr := getDeviceLinkPointer()
-	patch := []byte(`{"spec":{"template":{"spec":{"protocol":{"pattern":"wrong-pattern"}}}}}`)
-	Expect(k8sCli.Patch(testCtx, deviceLinkPtr, client.RawPatch(types.MergePatchType, patch))).Should(Succeed())
+	var err = k8sCli.Get(testCtx, object.GetNamespacedName(&testDeviceLink), &testDeviceLink)
+	Expect(err).Should(Succeed())
+	var patch = []byte(`{"spec":{"template":{"spec":{"protocol":{"pattern":"wrong-pattern"}}}}}`)
+	Expect(k8sCli.Patch(testCtx, &testDeviceLink, client.RawPatch(types.MergePatchType, patch))).Should(Succeed())
 }
 
 func isDeviceConnectedTrue() {
@@ -409,15 +693,16 @@ func isMQTTAdaptorPodsError() {
 }
 
 func deleteCorrespondingNode() {
-	var targetNode, err = node.GetValidWorker(testCtx, k8sCli)
-	Expect(err).ShouldNot(HaveOccurred())
-
 	var correspondingNode = corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: targetNode,
+			Name: testDeviceLink.Spec.Adaptor.Node,
 		},
 	}
 	Expect(k8sCli.Delete(testCtx, &correspondingNode)).Should(Succeed())
+}
+
+func redeployCorrespondingNode() {
+	Expect(framework.GetCluster().AddWorker(testRootDir, GinkgoWriter, testDeviceLink.Spec.Adaptor.Node)).Should(Succeed())
 }
 
 func deleteMQTTDeviceModel() {
@@ -432,133 +717,4 @@ func deleteMQTTDeviceModel() {
 func redeployMQTTDeviceModel() {
 	Expect(exec.RunKubectl(nil, GinkgoWriter, "apply", "-f", filepath.Join(testCurrDir, "deploy", "manifests", "crd", "base", "devices.edge.cattle.io_mqttdevices.yaml"))).
 		Should(Succeed())
-}
-
-func invalidServerURL() {
-	deviceLinkPtr := getDeviceLinkPointer()
-	patch := []byte(`{"spec":{"template":{"spec":{"protocol":{"client":{"server":"wrong-server"}}}}}}`)
-	Expect(k8sCli.Patch(testCtx, deviceLinkPtr, client.RawPatch(types.MergePatchType, patch))).Should(Succeed())
-}
-
-func correctServerURL() {
-	deviceLinkPtr := getDeviceLinkPointer()
-	patch := []byte(`{"spec":{"template":{"spec":{"protocol":{"client":{"server":"tcp://octopus-simulator-mqtt.octopus-simulator-system:1883"}}}}}}`)
-	Expect(k8sCli.Patch(testCtx, deviceLinkPtr, client.RawPatch(types.MergePatchType, patch))).Should(Succeed())
-}
-
-func publishMessage() {
-	var podList corev1.PodList
-	Expect(k8sCli.List(testCtx, &podList, client.InNamespace("default"))).Should(Succeed())
-	for _, pod := range podList.Items {
-		Expect(exec.RunKubectl(nil, GinkgoWriter, "exec", pod.Name, "--", "mosquitto_pub", "-h", "octopus-simulator-mqtt.octopus-simulator-system",
-			"-t", "cattle.io/octopus/home/control/kitchen/light/gear", "-m", "high")).Should(Succeed())
-	}
-}
-
-func isPublishedMessageInsideDeviceLink() {
-	var device v1alpha1.MQTTDevice
-	count := 0
-	Eventually(func() bool {
-		count++
-		var targetKey = types.NamespacedName{
-			Namespace: testDeviceLinkNamespace,
-			Name:      testDeviceLinkName,
-		}
-		if err := k8sCli.Get(testCtx, targetKey, &device); err != nil {
-			Fail(err.Error())
-		}
-		if len(device.Status.Properties) > 0 {
-			for _, property := range device.Status.Properties {
-				if property.Name == "gear" {
-					return string(property.Value.Raw) == "\""+base64.StdEncoding.EncodeToString([]byte("high"))+"\""
-				}
-			}
-		}
-		if count%10 == 0 && len(device.Status.Properties) == 0 {
-			publishMessage()
-		}
-		return false
-	}, 300, 1).Should(BeTrue())
-}
-
-func subscribeMessage() {
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker("tcp://test.mosquitto.org:1883")
-
-	choke := make(chan [2]string)
-
-	opts.SetDefaultPublishHandler(func(client mqtt.Client, msg mqtt.Message) {
-		choke <- [2]string{msg.Topic(), string(msg.Payload())}
-	})
-
-	testClient := mqtt.NewClient(opts)
-	if token := testClient.Connect(); token.Wait() && token.Error() != nil {
-		Fail(token.Error().Error())
-	}
-
-	topic := "cattle.io/octopus/home/status/kitchen/light/gear"
-	if token := testClient.Subscribe(topic, byte(1), nil); token.Wait() && token.Error() != nil {
-		Fail(token.Error().Error())
-	}
-
-	incoming := <-choke
-	subscribedMessage = incoming[1]
-
-	testClient.Disconnect(250)
-}
-
-func isSubscribedMessageValid() {
-	var targetKey = types.NamespacedName{
-		Namespace: testDeviceLink.Namespace,
-		Name:      testDeviceLink.Name,
-	}
-	var device v1alpha1.MQTTDevice
-	Eventually(func() bool {
-		if err := k8sCli.Get(testCtx, targetKey, &device); err != nil {
-			Fail(err.Error())
-		}
-		for _, property := range device.Spec.Properties {
-			if property.Name == "gear" {
-				return string(property.Value.Raw) == subscribedMessage
-			}
-		}
-		return false
-	}, 300, 1).Should(BeTrue())
-}
-
-func subscribeMessageAndSave() {
-	subscribeMessage()
-	temporaryMessage = subscribedMessage
-}
-
-func isMessagesTheSame() {
-	Expect(temporaryMessage == subscribedMessage).Should(BeTrue())
-}
-
-func isSubscribeMessageNull() {
-	Expect(subscribedMessage == "null").Should(BeTrue())
-}
-
-func deleteMQTTDeviceLink() {
-	var targetKey = types.NamespacedName{
-		Namespace: testDeviceLink.Namespace,
-		Name:      testDeviceLink.Name,
-	}
-	if err := k8sCli.Get(testCtx, targetKey, &testDeviceLink); err != nil {
-		Fail(err.Error())
-	}
-	Expect(k8sCli.Delete(testCtx, &testDeviceLink)).Should(Succeed())
-}
-
-func isDeviceLinkDeleted() {
-	Eventually(func() bool {
-		var deviceLinkKey = types.NamespacedName{
-			Name:      testDeviceLink.Name,
-			Namespace: testDeviceLink.Namespace,
-		}
-		if err := k8sCli.Get(testCtx, deviceLinkKey, &testDeviceLink); err != nil {
-			return true
-		}
-		return false
-	}, 300, 3).Should(BeTrue())
 }
