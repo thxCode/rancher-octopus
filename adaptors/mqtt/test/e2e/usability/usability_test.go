@@ -11,6 +11,7 @@ import (
 	v1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/pointer"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/rancher/octopus/adaptors/mqtt/api/v1alpha1"
@@ -18,6 +19,7 @@ import (
 	"github.com/rancher/octopus/pkg/util/converter"
 	"github.com/rancher/octopus/pkg/util/object"
 	"github.com/rancher/octopus/test/framework"
+	. "github.com/rancher/octopus/test/framework/ginkgo"
 	"github.com/rancher/octopus/test/util/content"
 	"github.com/rancher/octopus/test/util/exec"
 	"github.com/rancher/octopus/test/util/node"
@@ -259,7 +261,7 @@ var _ = Describe("verify usability", func() {
 
 		})
 
-		Specify("if delete corresponding node", func() {
+		K3dSpecify("if delete corresponding node", func() {
 
 			By("given the device link is connected", isDeviceConnectedTrue)
 
@@ -363,6 +365,7 @@ var _ = Describe("verify usability", func() {
 							GenerateName: "test-mqtt-",
 						},
 						Spec: batchv1.JobSpec{
+							TTLSecondsAfterFinished: pointer.Int32Ptr(10),
 							Template: corev1.PodTemplateSpec{
 								Spec: corev1.PodSpec{
 									RestartPolicy: corev1.RestartPolicyNever,
@@ -432,14 +435,38 @@ var _ = Describe("verify usability", func() {
 
 			})
 
-			XIt("should publish a message", func() {
+			It("should publish a message", func() {
 
 				By("given the device link is connected", isDeviceConnectedTrue)
 
 				By("when set value to a writable property", func() {
 					var err = k8sCli.Get(testCtx, object.GetNamespacedName(&testDeviceLink), &testDeviceLink)
 					Expect(err).Should(Succeed())
-					var patch = []byte(`{"spec":{"template":{"spec":{"properties":[{"name":"publishValue","readOnly":false,"value":"hello"}]}}}}`)
+					var patch = []byte(`
+{
+    "spec":{
+        "template":{
+            "spec":{
+                "properties":[
+                    {
+                        "name":"publishValue",
+                        "path":"publish_value",
+                        "type":"string",
+                        "description":"publish to broker",
+                        "value":"hello",
+                        "readOnly":false
+                    },
+                    {
+                        "name":"subscribeValue",
+                        "path":"subscribe_value",
+                        "type":"string",
+                        "description":"subscribe from broker"
+                    }
+                ]
+            }
+        }
+    }
+}`)
 					Expect(k8sCli.Patch(testCtx, &testDeviceLink, client.RawPatch(types.MergePatchType, patch))).Should(Succeed())
 				})
 
@@ -453,6 +480,7 @@ var _ = Describe("verify usability", func() {
 							GenerateName: "test-mqtt-",
 						},
 						Spec: batchv1.JobSpec{
+							TTLSecondsAfterFinished: pointer.Int32Ptr(10),
 							Template: corev1.PodTemplateSpec{
 								Spec: corev1.PodSpec{
 									InitContainers: []corev1.Container{
@@ -464,12 +492,12 @@ var _ = Describe("verify usability", func() {
 											},
 											Args: []string{
 												"-c",
-												"mosquitto_sub -h mqtt-broker.default -t cattle.io/octopus/home/set/in-cluster/publish_value -C 1",
+												"mosquitto_sub -h mqtt-broker.default -t cattle.io/octopus/home/set/in-cluster/publish_value -C 1 >/storage/test",
 											},
 											VolumeMounts: []corev1.VolumeMount{
 												{
 													Name:      "temp-volume",
-													MountPath: "/data",
+													MountPath: "/storage",
 												},
 											},
 										},
@@ -484,12 +512,12 @@ var _ = Describe("verify usability", func() {
 											},
 											Args: []string{
 												"-c",
-												"cat /data/test; grep -w 'hello' /data/test",
+												"grep -w hello /storage/test",
 											},
 											VolumeMounts: []corev1.VolumeMount{
 												{
 													Name:      "temp-volume",
-													MountPath: "/data",
+													MountPath: "/storage",
 												},
 											},
 										},
