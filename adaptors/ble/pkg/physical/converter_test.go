@@ -1,29 +1,30 @@
 package physical
 
 import (
-	"reflect"
 	"testing"
 
-	"github.com/davecgh/go-spew/spew"
+	"github.com/stretchr/testify/assert"
+
 	"github.com/rancher/octopus/adaptors/ble/api/v1alpha1"
 )
 
-func TestByteArrayToString(t *testing.T) {
-	type given struct {
-		converter v1alpha1.BluetoothDataConverter
+func TestBitsOperations(t *testing.T) {
+	type input struct {
+		converter *v1alpha1.BluetoothDataConverter
 		data      []byte
 	}
-	type expect struct {
-		result float64
+	type output struct {
+		result uint64
+		err    error
 	}
 	var testCases = []struct {
-		given  given
-		expect expect
+		given    input
+		expected output
 	}{
 		{
-			given: given{
+			given: input{
 				data: []byte{0x03, 0x00, 0x01},
-				converter: v1alpha1.BluetoothDataConverter{
+				converter: &v1alpha1.BluetoothDataConverter{
 					StartIndex:        1,
 					EndIndex:          2,
 					ShiftLeft:         1,
@@ -31,14 +32,15 @@ func TestByteArrayToString(t *testing.T) {
 					OrderOfOperations: nil,
 				},
 			},
-			expect: expect{
+			expected: output{
 				result: 2,
+				err:    nil,
 			},
 		},
 		{
-			given: given{
+			given: input{
 				data: []byte{0x00, 0x01, 0x02, 0x03},
-				converter: v1alpha1.BluetoothDataConverter{
+				converter: &v1alpha1.BluetoothDataConverter{
 					StartIndex:        0,
 					EndIndex:          3,
 					ShiftLeft:         0,
@@ -46,15 +48,15 @@ func TestByteArrayToString(t *testing.T) {
 					OrderOfOperations: nil,
 				},
 			},
-			expect: expect{
+			expected: output{
 				result: 72,
+				err:    nil,
 			},
 		},
 	}
 	for i, tc := range testCases {
-		var ret = ConvertReadData(tc.given.converter, tc.given.data)
-		if !reflect.DeepEqual(ret, tc.expect.result) {
-			t.Errorf("case %v: expected %s, got %s", i+1, spew.Sprintf("%#v", tc.expect), spew.Sprintf("%#v", ret))
-		}
+		var actual output
+		actual.result, actual.err = doBitsOperations(tc.given.data, tc.given.converter)
+		assert.Equal(t, tc.expected, actual, "case %d", i)
 	}
 }

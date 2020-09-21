@@ -133,10 +133,13 @@ func (c *BLEController) readCharacteristic(p gatt.Peripheral, ch *gatt.Character
 	}
 	c.log.Info("ReadCharacteristic value", string(b))
 
-	convertedValue := fmt.Sprintf("%f", ConvertReadData(property.Visitor.DataConverter, b))
-	c.log.Info("Converted read value to", convertedValue)
-	c.updateDeviceStatus(property.Name, convertedValue, property.AccessMode)
-	return convertedValue, nil
+	value, operatedValue, err := convertData(b, &property.Visitor.DataConverter)
+	if err != nil {
+		return "", err
+	}
+	c.log.Info("Converted read value to", value)
+	c.updateDeviceStatus(property.Name, value, operatedValue, property.AccessMode)
+	return value, nil
 }
 
 func (c *BLEController) writeCharacteristic(p gatt.Peripheral, ch *gatt.Characteristic, property v1alpha1.BluetoothDeviceProperty) error {
@@ -154,11 +157,10 @@ func (c *BLEController) writeCharacteristic(p gatt.Peripheral, ch *gatt.Characte
 		return err
 	}
 
-	value, err := c.readCharacteristic(p, ch, property)
+	_, err = c.readCharacteristic(p, ch, property)
 	if err != nil {
 		return err
 	}
-	c.updateDeviceStatus(property.Name, value, property.AccessMode)
 	return nil
 }
 
@@ -172,7 +174,7 @@ func (c *BLEController) getNotifyCharacteristic(p gatt.Peripheral, ch *gatt.Char
 	if (ch.Properties() & (gatt.CharNotify | gatt.CharIndicate)) != 0 {
 		f := func(ch *gatt.Characteristic, b []byte, err error) {
 			c.log.V(2).Info("Get notified data", string(b))
-			c.updateDeviceStatus(property.Name, string(b), property.AccessMode)
+			c.updateDeviceStatus(property.Name, string(b), "", property.AccessMode)
 		}
 		if err := p.SetNotifyValue(ch, f); err != nil {
 			return err
@@ -190,12 +192,13 @@ func findDataWriteToDeviceByDefaultValue(visitor v1alpha1.BluetoothDevicePropert
 	return nil, false
 }
 
-func (c *BLEController) updateDeviceStatus(name, value string, accessMode v1alpha1.BluetoothDevicePropertyAccessMode) {
+func (c *BLEController) updateDeviceStatus(name, value, operatedValue string, accessMode v1alpha1.BluetoothDevicePropertyAccessMode) {
 	sp := v1alpha1.BluetoothDeviceStatusProperty{
-		Name:       name,
-		Value:      value,
-		AccessMode: accessMode,
-		UpdatedAt:  now(),
+		Name:          name,
+		Value:         value,
+		OperatedValue: operatedValue,
+		AccessMode:    accessMode,
+		UpdatedAt:     now(),
 	}
 	found := false
 	for i, property := range c.statusProps {

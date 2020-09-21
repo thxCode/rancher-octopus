@@ -150,6 +150,10 @@ type BluetoothDeviceStatusProperty struct {
 	// +optional
 	Value string `json:"value,omitempty"`
 
+	// Reports the operated value of property.
+	// +optional
+	OperatedValue string `json:"operatedValue,omitempty"`
+
 	// Specifies the access mode of property.
 	// +optional
 	AccessMode BluetoothDevicePropertyAccessMode `json:"accessMode,omitempty"`
